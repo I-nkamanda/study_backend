@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager #asynccontextmanager라는 데코레�
 from fastapi import FastAPI, HTTPException # FastAPI: 웹 애플리케이션의 핵심 클래스 / HTTPException: HTTP 오류 응답을 반환함
 from pydantic import BaseModel, EmailStr # BaseModel: 데이터 유효성 검사 / 설정 관리를 위한 기본 플래스, EmailStr: 이메일 형식의 문자열을 검증하는 데 사용됨
 from dotenv import load_dotenv # .env 파일에 정의된 환경 변소를 현재 환경으로 로드하는데 사용됨
+from fastapi.middleware.cors import CORSMiddleware
 
 from sqlalchemy import String, text, select # String: VARCHAR와 같은 문자열 데이터 타입, text: 원시 SQL 표현식, select: SELECT 쿼리 구성에 사용됨
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker #불러오는 각 구성요소들은 ORM (Object Relational Mapper)를 사용, 파이썬 클래스를 DB 테이블에 매핑하는 핵심 구성 요소
@@ -35,6 +36,16 @@ class User(Base): #Base 클래스를 상속받아서 User 모델을 정의
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False) #email 필드를 정의 데이터 타입은 문자열(string(255))이고, 값이 고유(unique:True)하며, 인덱스가 생성되고(index=True), NULL값을 받지 않는다 (nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(server_default=text("CURRENT_TIMESTAMP"), nullable=False) #created_at 필드를 정의함. 데이터 타입은 datetime이며, DB 서버에서 자동으로 현재 시간을 기본값으로 설정하도록 (server_default=text("CURRENT_TIMESTAMP")) 함.
 
+class Todo(Base):
+    __tablename__ = "todos"
+    id: Mapped[int] = mapped_column(primary_key = True, autoincrement = True)
+    task: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_important: Mapped[int] = mapped_column(nullable=False, default = 0)
+    is_completed: Mapped[bool] = mapped_column(nullable=False, default=False) #다 하지 않은 게 default
+    created_at: Mapped[dt.datetime] = mapped_column(
+        server_default=text("CURRENT_TIMESTAMP"), 
+        nullable = False)
+
 
 # 4. 서버 라이프사이클: 시작 시 테이블 자동 생성
 
@@ -47,6 +58,15 @@ async def lifespan(app:FastAPI): #FastAPI 애플리케이션의 시작 및 종�
 
 app = FastAPI(lifespan=lifespan) # FastAPI 애플리케이션 인스턴스를 생성하고, 위에서 정리한 lifespan 함수를 라이프사이클 관리자로 ㄷㅇ록함
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 #기존 루트
 @app.get("/") #HTTP GET 요청을 "/" 경로로 처리하는 라우트 데코레이터
 def read_root(): #요청을 처리하는 함수 정의
@@ -56,6 +76,46 @@ def read_root(): #요청을 처리하는 함수 정의
 # 5. (테스트용) 간단 CRUD
 class UserCreate(BaseModel): #Pydantic의 BaseModel을 상속받아 사용자 생성 요청 데이터의 유효성을 검사하는 schema를 정의함
     email: EmailStr #이메일 필드 정의, EmailStr 타입을 사용해서 형식이 이메일 형식인지 자동 유효성 검사
+
+class TodoCreate(BaseModel):
+    task: str
+    is_important: int # bool -> int 로 수정함
+
+@app.post("/todos")
+async def create_todo(payload: TodoCreate):
+    async with AsyncSessionLocal() as session: #Pydantic 모델의 bool을 DB에 저장할 int로 변환
+        # is_important_int = 1 if payload.is_important else 0
+        t = Todo(task=payload.task, is_important=payload.is_important) #바로 정수값을 받습니다.
+
+        session.add(t)
+        await session.commit()
+        await session.refresh(t)
+
+        #is_important를 다시 bool로 변환해서 응답
+        return {
+            "id": t.id,
+            "task": t.task,
+            "is_important": bool(t.is_important),
+            "is_completed": t.is_completed,
+            "created_at": t.created_at
+        }
+
+@app.get("/todos")
+async def list_todos():
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(Todo).order_by(Todo.id.desc())) #최신순으로 정렬
+        todos = res.scalars().all()
+
+        #응답 데이터를 JSON 형식으로 변환
+        return [
+            {
+                "id": todo.id,
+                "task": todo.task,
+                "is_important": bool(todo.is_important),
+                "is_completed": todo.is_completed,
+                "created_at": todo.created_at
+            } for todo in todos
+        ]
 
 @app.post("/users") #HTTP POST 요청을 "/users" 경로로 처리하는 라우트 데코레이터
 async def create_user(payload: UserCreate): #UserCreate 스키마에 따라 유효성 검사된 요청 본문을 payload라는 매개 변수로 받음
@@ -67,7 +127,7 @@ async def create_user(payload: UserCreate): #UserCreate 스키마에 따라 유�
         session.add(u) #새로운 객체 (u)를 세션에 추가해서 데이터베이스에 삽입할 준비를 함
         await session.commit() #데이터베이스에 변경 사항을 커밋하여 새로운 사용자를 저장함
         await session.refresh(u) # 데이터베이스에서 객체의 최신 상태를 다시 로드함. (DB가 자동 생성산 'id'와 'created_at"값을 가져오기 위한 것.)
-        return {"id": u.id, "email": u.email, "created_at": u.created_at} #성공적으로 생성된 사용자 정보를 JSON으로 반환하기
+        return {"id": u.id, "email": u.email, "created_at": u.created_at} #성공적으로 생성된 사용자 정보를 JSON으로 반환하기 ## HTTP 사용해서 반환
         
 @app.get("/users") #HTTP GET 요청을 "/users"경로로 처리하는 라우트 데코레이터
 async def list_users(): #모든 사용자를 조회하는 함수의 정의
